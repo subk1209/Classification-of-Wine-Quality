@@ -1,0 +1,375 @@
+---
+title: "Wine Quality Analysis"
+author: 
+ - "Saptarshi Chowdhury"
+ - "Subhajit Karmakar"
+ - "Swastik Bhowmick"
+date: "2023-09-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height = 4.5, fig.width = 12)
+```
+
+
+## Dataset
+Here we have worked on a dataset which is based on the quality of the Portuguese **Vinho Verde** wine, taken from <https://www.kaggle.com/datasets/uciml/red-wine-quality-cortez-et-al-2009>.
+
+## Objective
+Prediction of the quality of wine that is whether a particular wine is good or bad using Logistic regression based on the covariates present in the dataset.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggcorrplot)
+library(grid)
+library(gridExtra)
+library(caTools)
+library(caret)
+library(class)
+library(performance)
+library(glue)
+library(pROC)
+```
+
+
+## Data Description
+These are the features in the dataset.
+
+```{r}
+df <- read_csv("D:/Projects/Self Project/2/WineQuality.csv",
+               show_col_types = F)
+
+glimpse(df)
+```
+
+
+## Exploratory Data Analysis
+Here, we are interested in working with the white variant of the  Portuguese **Vinho Verde** wine, hence we have takes a subset of the dataset accordingly. 
+
+```{r}
+df <- df %>% filter(type == 'white') %>% 
+  select(-type)
+```
+
+Then we check for the missing values in the new dataset. 
+
+```{r}
+df %>% summarise_all(~ sum(is.na(.))) %>% 
+  t() 
+```
+Here, in order to treat the missing values, we will basically substitute them by the respective means of those variables.
+
+```{r}
+df <- df %>% mutate(across(where(is.numeric), 
+                           ~replace_na(., mean(., na.rm = TRUE))))
+```
+
+Now, we have a dataset where the type of wine is white and there are no missing values in it, hence we can go about with dealing with the objective. Firstly, we have done some manipulations to make the dataframe more appealing, then as we are eventually going to perform logistic regression, we have transformed the response variable which is `quality` of the wine into a binary variable which takes the value 1 (good), when it's corresponding rating is greater than 5 and 0 (bad), when it's corresponding rating is less than or equal to 5. 
+
+```{r}
+# Changing the column names:
+cname <- gsub(" ", "_", colnames(df))
+colnames(df) <- cname
+vars_fac <- c('type','quality')
+vars_cont <- cname[!(cname %in% vars_fac)]
+
+
+# re-leveling the quality column:
+df %>% mutate('Quality' = case_when(
+  quality %in% 3:5 ~ 0,
+  quality %in% 6:9 ~ 1
+)) %>% select(-quality) -> df
+df$Quality <- as.factor(df$Quality)
+```
+
+
+First, we check the distribution of the quality of wine to see if the classes are balanced or not.
+```{r, fig.height=4, fig.width=5}
+df %>% count(Quality) %>% 
+  ggplot(aes(x = Quality, y = n)) + geom_col(fill = 'red',
+                                             colour = 'black',
+                                             width = 0.4) +
+  labs(y = 'Count') +
+  theme_minimal()
+```
+
+Next, we do some visualizations of the distribution of each covariate with respect to the quality of wine.
+
+```{r}
+plot2 <- function(var, fill_var){
+  cols <- c('yellow','blue')
+  
+  df %>% ggplot(aes({{var}}, fill = {{fill_var}})) + 
+    geom_density(colour = NA, alpha = 0.4) +
+    scale_x_continuous(n.breaks = 10) + 
+    labs(x = '') + theme_minimal() +
+    scale_fill_manual(values = cols) -> p1
+  
+  df %>% ggplot(aes({{var}}, fill = {{fill_var}})) + 
+    geom_boxplot(outlier.colour = 'red',
+                 outlier.size = 2) + 
+    labs(x = '') +theme_minimal() +
+    scale_fill_manual(values = cols) -> p2
+  grid.arrange(p1,p2, ncol = 2)
+}
+```
+
+**Fixed Acidity ~ Quality**
+```{r, echo=FALSE}
+plot2(fixed_acidity, Quality)
+```
+
+
+**Volatile Acidity ~ Quality**
+```{r, echo=FALSE}
+plot2(volatile_acidity, Quality)
+```
+
+**Citric Acid ~ Quality**
+```{r, echo=FALSE}
+plot2(citric_acid, Quality)
+```
+
+**Residual Sugar ~ Quality**
+```{r, echo=FALSE}
+plot2(residual_sugar, Quality)
+```
+
+**Chlorides ~ Quality**
+```{r, echo=FALSE}
+plot2(chlorides, Quality)
+```
+
+**Free Sulfur Dioxide ~ Quality**
+```{r, echo=FALSE}
+plot2(free_sulfur_dioxide, Quality)
+```
+
+**Total Sulfur Dioxide ~ Quality**
+```{r, echo=FALSE}
+plot2(total_sulfur_dioxide, Quality)
+```
+
+**Density ~ Quality**
+```{r, echo=FALSE}
+plot2(density, Quality)
+```
+
+**pH ~ Quality**
+```{r, echo=FALSE}
+plot2(pH, Quality)
+```
+
+**Sulphates ~ Quality**
+```{r, echo=FALSE}
+plot2(sulphates, Quality)
+```
+
+**Alcohol ~ Quality**
+```{r, echo=FALSE}
+plot2(alcohol, Quality)
+```
+
+**Comment:** Say, for example, we take the distribution of `alcohol` with respect to quality of wine. Here, we can observe that as the alcohol quantity increases, the quality of wine tends to be good. We can make similar observations regarding other covariates with respect the quality of wine as well.
+
+
+Now, let us plot the correlations between each predictor in the dataset using a correlation heatmap.
+
+```{r, fig.height=7, fig.width=7}
+df %>% select(-Quality) %>% 
+  cor() %>% ggcorrplot(lab = T, type = 'upper')
+```
+
+Here, from the above correlation plot, we can observe that there is multicollinearity present in the data. Now, to check which covariates contribute to it, we go for variance inflation factor.
+
+```{r}
+glm(Quality ~ ., data = df, 
+    family = binomial(link = 'logit')) -> g1
+check_collinearity(g1)
+```
+
+Here, we can observe that `residual_sugar` and `density` have vifs greater that 10 and `density` has significantly high vif, hence we can omit `density` from the model and recalculate vif.
+
+```{r}
+df <- df %>% select(-density)
+
+# re-checking
+glm(Quality ~ ., data = df, 
+    family = binomial(link = 'logit')) -> g2
+check_collinearity(g2)
+```
+
+**Comment:** Here after removing density from the model, we can see that the dataset is free of multicollinearity. Hence we can proceed with the model building part.
+
+
+## Model Building
+Firstly, we split the dataset into **training** dataset and **testing** dataset. 
+
+```{r}
+set.seed(42)
+s <- sample.split(df$Quality, SplitRatio = 0.75)
+train_data <- subset(df, s == TRUE)
+test_data <- subset(df, s == FALSE)
+```
+
+Next, we fit a multiple logistic regression model to the data, since our response variable is a binary variable and we have multiple covariates.
+
+
+```{r}
+gL <- glm(Quality ~ ., data = train_data,
+          family = binomial(link = 'logit'))
+summary(gL)
+```
+
+Here, we can observe that the covariates `citric acid`, `chlorides` and `pH` have corresponding p-values of greater than $\small \alpha = 0.05$. Hence these covariates are not significants in predicting the quality of wine. So, we proceed with fitting the model again by removing them. 
+
+```{r}
+gL2 <- glm(Quality ~ .-citric_acid-chlorides-pH, 
+           data = train_data,
+           family = binomial(link = 'logit'))
+summary(gL2)
+```
+
+
+
+```{r}
+p_hat_train <- predict.glm(gL2, type = 'response')
+
+## Optimum cut-off selection:
+metric_func <- function(data, phat){   
+  cut_points <- seq(0.01,0.99,0.001)
+  
+  d <- data.frame(matrix(nrow = length(cut_points),
+                         ncol = 4, dimnames = list(
+                           paste(1:length(cut_points)),
+                           c('p_opt','Accuracy',
+                             'Sensitivity','Specificity')
+                         )))
+  
+  for(i in 1:length(cut_points)){
+    C <- confusionMatrix(
+      if_else(phat >= cut_points[i], 1, 0) %>% as.factor(),
+      data$Quality)
+    
+    d[i,] <- c(cut_points[i], C$overall[[1]],
+               C$byClass[[1]],C$byClass[[2]])
+  }
+  
+  d$sens_spec <- d[,3]*d[,4]
+  return(d)
+}
+
+
+m_train <- metric_func(train_data,p_hat_train) 
+p1_opt <- m_train[which.max((m_train$sens_spec)),]$p_opt
+p2_opt <- m_train[which.max((m_train$sens_spec)),]$p_opt
+
+glue('Optimum threshold: {t}', t = p1_opt)
+```
+Here, we could observe that the predicted values for quality lie between 0 and 1, however the actual values are binary in nature, so when the values of the covariates are given, we need the model to predict whether the quality of the wine is good (1) or bad (0). Hence we use the concept of optimum threshold where if the fitted value of the quality comes out to be greater than that, we term it as good otherwise bad. 
+
+* The optimum threshold comes out to be: $\small 0.658$
+
+
+
+```{r, fig.height= 5, fig.width=8}
+m_train %>% 
+  pivot_longer(Accuracy:sens_spec,
+               names_to = 'Metrics', values_to = 'value') %>% 
+  ggplot(aes(x = p_opt, y = value, colour = Metrics)) +
+  geom_line() + labs(x = 'Cutoff (p)') +
+  geom_vline(xintercept = c(p1_opt, p2_opt), lty = 5) +
+  theme_minimal()
+```
+
+Here, we have plotted the values of accuracy, sensitivity, specificity and product of sensitivity and specificity with respect to the predicted probabilities.
+
+
+## Performance metrics
+Here, in order to check the efficacy of the fitted multiple logistic regression model, we evaluate the performance metrics, that is: **Accuracy, Recall, Precision, F1-Score**.
+
+```{r}
+# Function for PRECISION & RECALL:
+stats2 <- function(C, model){
+  t <- C$table
+  
+  acc <- C$overall[[1]]
+  pre <- t[2,2]/(t[2,2]+t[2,1])
+  rec <- t[2,2]/(t[2,2]+t[1,2])
+  f1 <- 2*(rec*pre)/(rec+pre)
+  
+  matrix(c(acc,pre,rec,f1), byrow = T,
+         dimnames = list(c('Accuracy','Precision',
+                           'Recall','F1-Score'),
+                         paste(model))) -> M
+  return(list('Confusion Matrix' = t,
+              'Metrics' = M))
+}
+
+
+confusionMatrix(ifelse(p_hat_train >= p1_opt, 1, 0) %>% 
+                  as.factor(), train_data$Quality) -> C1
+
+stats2(C1,'Logistic')
+```
+
+**Comment:** 
+
+* Here, the accuracy comes out to be $\small 0.7245509$, which means that the fitted model along with the thresold probability of $\small 0.658$ can accurately predict the quality of wine $\small 72.45\%$ of the times. 
+
+* Again, the recall comes out to be $\small 0.7193126$ and precision comes to be $\small 0.8435701$. Here a lower value of recall as compared to precision indicates a higher value of false negatives which means that the ocurance of the quality of wine being actually **good** but the model predicting it as **bad** is comparatively high. 
+
+
+### AUC-ROC Curve
+Now, in order to get an idea of how good the fitted model is that is how well it can predict the quality of wine, there is another metric that we can use which is the **ROC** curve, and from there we get **AUC** (area under the curve) and higher the value of AUC, that is closer to 1, better is performance of the fitted model. 
+
+
+```{r, fig.height= 4, fig.width= 5}
+ROC_func <- function(m, type){
+  plot(1 - m$Specificity, m$Sensitivity, type = 'l',
+       main = paste('ROC curve ||',type,'data'), 
+       ylab = 'Sensitivity (TPR)',
+       xlab = '1-Specificity (FPR)', lwd = 2, las = 1)
+  abline(a = 0, b = 1, h = 0:1, v = 0:1, lty = 2)
+}
+
+ROC_func(m_train, 'Train')
+```
+
+```{r, message=FALSE}
+roc_object <- roc(train_data$Quality, p_hat_train)
+glue('The AUC is: {a}', a = roc_object %>% auc() %>% round(3))
+```
+
+**Comment:** The AUC value is coming out to be $\small 0.802$, which is an indication that the model fitted is really good.
+
+
+## Test Data Analysis
+Now that we have obtained a fitted multiple logistic regression model, we can use an unseen data which is the test data in this case, to get predicted values of the quality of the wine and accordingly compare it with the actual values using a confusion matrix.
+
+```{r}
+p_hat_test <- predict.glm(gL2, newdata = test_data,
+                         type = 'response')
+
+confusionMatrix(ifelse(p_hat_test >= p1_opt, 1, 0) %>% 
+                  as.factor(), test_data$Quality) -> C2
+
+stats2(C2,'Logistic')
+```
+
+
+#### ROC-AUC on Test Data
+```{r, message=FALSE, warning=FALSE, fig.height= 4, fig.width= 5}
+m_test <- metric_func(test_data, p_hat_test)
+ROC_func(m_test, 'Test')
+roc_object <- roc(test_data$Quality, p_hat_test)
+glue('The AUC is: {a}', a = roc_object %>% auc() %>% round(3))
+```
+
+**Comment:** Looking at the AUC value of $\small 0.789$, we can see that the model performs good even on unseen data, hence we can say that the overall fit of the model is good. 
+
+
+
+
